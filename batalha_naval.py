@@ -1,8 +1,15 @@
+"""Lógica da Batalha Naval.
+
+Este arquivo não imprime nada e não usa tkinter: ele só sabe jogar.
+As interfaces (terminal e janela) usam as classes daqui.
+"""
+
+import json
+import os
 import random
-import tkinter as tk
-from tkinter import messagebox
 
 TAMANHO = 10
+LETRAS = "ABCDEFGHIJ"
 FROTA = {
     "Porta-aviões": 5,
     "Encouraçado": 4,
@@ -10,21 +17,20 @@ FROTA = {
     "Submarino": 3,
     "Destroyer": 2,
 }
-LETRAS = "ABCDEFGHIJ"
 
 
 # ---------------------------------------------------------------
-# LÓGICA
+# Tabuleiro
 # ---------------------------------------------------------------
 
 class Tabuleiro:
     def __init__(self):
         self.navios = {}      # (linha, coluna) -> nome do navio
-        self.restantes = {}   # nome do navio -> quantas casas ainda não foram atingidas
+        self.restantes = {}   # nome do navio -> casas ainda não atingidas
         self.tiros = set()    # casas onde já se atirou
-        self.posicionar_frota()
+        self._posicionar_frota()
 
-    def posicionar_frota(self):
+    def _posicionar_frota(self):
         for nome, tamanho in FROTA.items():
             while True:
                 linha = random.randrange(TAMANHO)
@@ -34,8 +40,10 @@ class Tabuleiro:
                 else:
                     casas = [(linha + i, coluna) for i in range(tamanho)]
 
-                cabe = all(0 <= l < TAMANHO and 0 <= c < TAMANHO and (l, c) not in self.navios
-                           for l, c in casas)
+                cabe = all(
+                    0 <= l < TAMANHO and 0 <= c < TAMANHO and (l, c) not in self.navios
+                    for l, c in casas
+                )
                 if cabe:
                     for casa in casas:
                         self.navios[casa] = nome
@@ -53,9 +61,18 @@ class Tabuleiro:
             return "afundou", nome
         return "acerto", nome
 
+    def afundado(self, casa):
+        """True se a casa pertence a um navio que já afundou por inteiro."""
+        nome = self.navios.get(casa)
+        return nome is not None and self.restantes[nome] == 0
+
     def perdeu(self):
         return all(falta == 0 for falta in self.restantes.values())
 
+
+# ---------------------------------------------------------------
+# Computador
+# ---------------------------------------------------------------
 
 class Computador:
     """Atira aleatoriamente. Depois de acertar, tenta as casas vizinhas."""
@@ -79,8 +96,76 @@ class Computador:
                 self.alvos.append(viz)
 
 
+# ---------------------------------------------------------------
+# Partida (controla os turnos; é o que as interfaces usam)
+# ---------------------------------------------------------------
+
+class Partida:
+    def __init__(self):
+        self.tab_jogador = Tabuleiro()
+        self.tab_computador = Tabuleiro()
+        self.ia = Computador()
+        self.vez_do_jogador = True
+        self.vencedor = None  # None, "jogador" ou "computador"
+
+    @property
+    def terminou(self):
+        return self.vencedor is not None
+
+    @property
+    def mensagem_final(self):
+        if self.vencedor == "jogador":
+            return "Você venceu!"
+        if self.vencedor == "computador":
+            return "O computador venceu!"
+        return ""
+
+    def jogador_atira(self, casa):
+        """Devolve (resultado, nome), ou None se o tiro não for válido agora."""
+        if self.terminou or not self.vez_do_jogador or casa in self.tab_computador.tiros:
+            return None
+        resposta = self.tab_computador.atirar(casa)
+        if self.tab_computador.perdeu():
+            self.vencedor = "jogador"
+        else:
+            self.vez_do_jogador = False
+        return resposta
+
+    def computador_atira(self):
+        """Devolve (casa, resultado, nome)."""
+        casa = self.ia.escolher(self.tab_jogador)
+        resultado, nome = self.tab_jogador.atirar(casa)
+        if resultado == "acerto":
+            self.ia.acertou(casa)
+        if self.tab_jogador.perdeu():
+            self.vencedor = "computador"
+        else:
+            self.vez_do_jogador = True
+        return casa, resultado, nome
+
+
+# ---------------------------------------------------------------
+# Funções auxiliares usadas pelas duas interfaces
+# ---------------------------------------------------------------
+
+def nome_da_casa(casa):
+    """(0, 1) -> 'B1'"""
+    return f"{LETRAS[casa[1]]}{casa[0] + 1}"
+
+
+def ler_casa(entrada):
+    """'b5' -> (4, 1). Devolve None se a entrada for inválida."""
+    entrada = entrada.strip().upper()
+    if len(entrada) < 2 or entrada[0] not in LETRAS or not entrada[1:].isdigit():
+        return None
+    linha = int(entrada[1:]) - 1
+    if not 0 <= linha < TAMANHO:
+        return None
+    return (linha, LETRAS.index(entrada[0]))
+
+
 def texto(quem, casa, resultado, nome):
-    local = f"{LETRAS[casa[1]]}{casa[0] + 1}"
+    local = nome_da_casa(casa)
     if resultado == "agua":
         return f"{quem} atirou em {local}: água."
     tamanho = FROTA[nome]
@@ -90,109 +175,96 @@ def texto(quem, casa, resultado, nome):
 
 
 # ---------------------------------------------------------------
-# INTERFACE
+# Jogador
 # ---------------------------------------------------------------
 
-class Jogo:
-    def __init__(self, janela):
-        self.janela = janela
-        self.agendado = None
-        janela.title("Batalha Naval")
+class Jogador:
+    """Guarda nome, idade e nickname de quem vai jogar."""
 
-        self.msg_eu = tk.Label(janela, font=("Arial", 14, "bold"))
-        self.msg_eu.grid(row=0, column=0, columnspan=2, pady=(8, 0))
-        self.msg_pc = tk.Label(janela, font=("Arial", 11), fg="gray")
-        self.msg_pc.grid(row=1, column=0, columnspan=2)
+    def __init__(self, nome, idade, nickname):
+        self.nome = nome
+        self.idade = idade
+        self.nickname = nickname
 
-        tk.Label(janela, text="Tabuleiro do computador (clique para atirar)").grid(row=2, column=0)
-        tk.Label(janela, text="Seu tabuleiro").grid(row=2, column=1)
-        self.celulas_pc = self.criar_grade(0, clicavel=True)
-        self.celulas_eu = self.criar_grade(1, clicavel=False)
+    @classmethod
+    def pedir_dados(cls):
+        """Pergunta nome, idade e nickname no terminal e devolve um Jogador."""
+        nome = cls._pedir_texto("Qual é o seu nome? ")
+        idade = cls._pedir_idade()
+        apelido = input("Como você gostaria de ser chamado (nickname)? ").strip()
+        if not apelido:
+            apelido = nome.split()[0]
+        return cls(nome, idade, apelido)
 
-        legenda = ", ".join(f"{nome[0]} = {nome} ({tam})" for nome, tam in FROTA.items())
-        tk.Label(janela, text=legenda).grid(row=4, column=0, columnspan=2, pady=5)
-        tk.Button(janela, text="Novo jogo", command=self.novo_jogo).grid(
-            row=5, column=0, columnspan=2, pady=(0, 8))
+    @staticmethod
+    def _pedir_texto(pergunta):
+        while True:
+            resposta = input(pergunta).strip()
+            if resposta:
+                return resposta
+            print("Esse campo não pode ficar vazio.")
 
-        self.novo_jogo()
+    @staticmethod
+    def _pedir_idade():
+        while True:
+            resposta = input("Qual é a sua idade? ").strip()
+            if resposta.isdigit() and 1 <= int(resposta) <= 120:
+                return int(resposta)
+            print("Digite uma idade válida (número de 1 a 120).")
 
-    def criar_grade(self, coluna, clicavel):
-        quadro = tk.Frame(self.janela, padx=10, pady=5)
-        quadro.grid(row=3, column=coluna)
-        for c in range(TAMANHO):
-            tk.Label(quadro, text=LETRAS[c]).grid(row=0, column=c + 1)
-        celulas = {}
-        for l in range(TAMANHO):
-            tk.Label(quadro, text=str(l + 1)).grid(row=l + 1, column=0)
-            for c in range(TAMANHO):
-                celula = tk.Label(quadro, width=3, bg="white", relief="ridge", borderwidth=2)
-                celula.grid(row=l + 1, column=c + 1)
-                if clicavel:
-                    celula.bind("<Button-1>", lambda e, casa=(l, c): self.clicar(casa))
-                celulas[(l, c)] = celula
-        return celulas
+    def __str__(self):
+        return f"{self.nickname} ({self.nome}, {self.idade} anos)"
 
-    def novo_jogo(self):
-        if self.agendado:
-            self.janela.after_cancel(self.agendado)
-            self.agendado = None
-        self.pc = Tabuleiro()
-        self.eu = Tabuleiro()
-        self.ia = Computador()
-        self.minha_vez = True
-        self.fim = False
 
-        for celula in self.celulas_pc.values():
-            celula.config(bg="white", text="")
-        for casa, celula in self.celulas_eu.items():
-            celula.config(bg="gray" if casa in self.eu.navios else "white", text="")
-        self.msg_eu.config(text="Sua vez! Clique no tabuleiro do computador.")
-        self.msg_pc.config(text="")
+# ---------------------------------------------------------------
+# Ranking
+# ---------------------------------------------------------------
 
-    def clicar(self, casa):
-        if self.fim or not self.minha_vez or casa in self.pc.tiros:
+class Ranking:
+    """Guarda vitórias e derrotas de cada jogador em um arquivo ranking.json."""
+
+    def __init__(self, arquivo=None):
+        pasta = os.path.dirname(os.path.abspath(__file__))
+        self.arquivo = arquivo or os.path.join(pasta, "ranking.json")
+        self.dados = {}
+        self.carregar()
+
+    def carregar(self):
+        try:
+            with open(self.arquivo, encoding="utf-8") as f:
+                self.dados = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.dados = {}
+
+    def salvar(self):
+        with open(self.arquivo, "w", encoding="utf-8") as f:
+            json.dump(self.dados, f, ensure_ascii=False, indent=2)
+
+    def registrar(self, jogador, venceu):
+        """Soma uma vitória (venceu=True) ou uma derrota ao jogador e salva."""
+        registro = self.dados.setdefault(jogador.nickname.lower(), {
+            "nickname": jogador.nickname, "nome": jogador.nome,
+            "idade": jogador.idade, "vitorias": 0, "derrotas": 0,
+        })
+        registro["nome"] = jogador.nome
+        registro["idade"] = jogador.idade
+        registro["vitorias" if venceu else "derrotas"] += 1
+        self.salvar()
+
+    def top(self, quantidade=10):
+        """Mais vitórias primeiro; em empate, quem tem menos derrotas."""
+        ordenados = sorted(
+            self.dados.values(),
+            key=lambda r: (-r["vitorias"], r["derrotas"], r["nickname"].lower()),
+        )
+        return ordenados[:quantidade]
+
+    def exibir(self, quantidade=10):
+        print("\n=== RANKING ===")
+        top = self.top(quantidade)
+        if not top:
+            print("Ainda não há partidas registradas.")
             return
-        resultado, nome = self.pc.atirar(casa)
-        self.pintar(self.celulas_pc, self.pc, casa, resultado, nome)
-        self.msg_eu.config(text=texto("Você", casa, resultado, nome))
-
-        if self.pc.perdeu():
-            self.terminar("Você venceu!")
-            return
-        self.minha_vez = False
-        self.agendado = self.janela.after(800, self.turno_pc)
-
-    def turno_pc(self):
-        self.agendado = None
-        casa = self.ia.escolher(self.eu)
-        resultado, nome = self.eu.atirar(casa)
-        if resultado == "acerto":
-            self.ia.acertou(casa)
-        self.pintar(self.celulas_eu, self.eu, casa, resultado, nome)
-        self.msg_pc.config(text=texto("Computador", casa, resultado, nome))
-
-        if self.eu.perdeu():
-            self.terminar("O computador venceu!")
-            return
-        self.minha_vez = True
-
-    def pintar(self, celulas, tabuleiro, casa, resultado, nome):
-        if resultado == "agua":
-            celulas[casa].config(bg="lightblue", text="o")
-            return
-        celulas[casa].config(bg="orange", text=nome[0])
-        if resultado == "afundou":
-            for c, n in tabuleiro.navios.items():
-                if n == nome:
-                    celulas[c].config(bg="red", text=nome[0])
-
-    def terminar(self, mensagem):
-        self.fim = True
-        self.msg_eu.config(text=mensagem)
-        messagebox.showinfo("Fim de jogo", mensagem)
-
-
-if __name__ == "__main__":
-    janela = tk.Tk()
-    Jogo(janela)
-    janela.mainloop()
+        print(f"{'#':>2}  {'Nickname':<15} {'Vitórias':>8} {'Derrotas':>8}")
+        for posicao, r in enumerate(top, start=1):
+            print(f"{posicao:>2}  {r['nickname']:<15} {r['vitorias']:>8} {r['derrotas']:>8}")
